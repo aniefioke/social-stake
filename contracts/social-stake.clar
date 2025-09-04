@@ -525,3 +525,121 @@
       weight: voting-weight,
       timestamp: stacks-block-height,
     })
+
+    ;; Update proposal vote counts
+    (map-set governance-proposals { proposal-id: proposal-id }
+      (merge proposal {
+        votes-for: (if vote-for
+          (+ (get votes-for proposal) voting-weight)
+          (get votes-for proposal)
+        ),
+        votes-against: (if vote-for
+          (get votes-against proposal)
+          (+ (get votes-against proposal) voting-weight)
+        ),
+        total-votes: (+ (get total-votes proposal) voting-weight),
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (execute-proposal (proposal-id uint))
+  (let (
+      (proposal (unwrap! (map-get? governance-proposals { proposal-id: proposal-id })
+        ERR_PROPOSAL_NOT_FOUND
+      ))
+      (circle (unwrap! (map-get? trust-circles { circle-id: (get circle-id proposal) })
+        ERR_CIRCLE_NOT_FOUND
+      ))
+    )
+    ;; Validation
+    (asserts! (>= stacks-block-height (get expires-at proposal))
+      ERR_VOTING_CLOSED
+    )
+    (asserts! (not (get executed proposal)) ERR_INVALID_PARAMS)
+    (asserts! (> (get votes-for proposal) (get votes-against proposal))
+      ERR_INVALID_VOTE
+    )
+
+    ;; Check quorum
+    (let ((required-votes (/ (* (get total-staked circle) QUORUM_THRESHOLD) u100)))
+      (asserts! (>= (get total-votes proposal) required-votes) ERR_INVALID_VOTE)
+    )
+
+    ;; Mark as executed
+    (map-set governance-proposals { proposal-id: proposal-id }
+      (merge proposal { executed: true })
+    )
+
+    ;; Execute based on proposal type
+    (if (is-eq (get proposal-type proposal) "reward")
+      (match (get target proposal)
+        target-principal (reward-member (get circle-id proposal) target-principal
+          (get amount proposal)
+        )
+        ERR_INVALID_PARAMS
+      )
+      (ok true)
+    )
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+
+(define-read-only (get-circle-info (circle-id uint))
+  (map-get? trust-circles { circle-id: circle-id })
+)
+
+(define-read-only (get-member-info
+    (circle-id uint)
+    (member principal)
+  )
+  (map-get? circle-members {
+    circle-id: circle-id,
+    member: member,
+  })
+)
+
+(define-read-only (get-user-reputation (user principal))
+  (map-get? user-reputation { user: user })
+)
+
+(define-read-only (get-proposal-info (proposal-id uint))
+  (map-get? governance-proposals { proposal-id: proposal-id })
+)
+
+(define-read-only (get-vote-info
+    (proposal-id uint)
+    (voter principal)
+  )
+  (map-get? member-votes {
+    proposal-id: proposal-id,
+    voter: voter,
+  })
+)
+
+(define-read-only (get-escrow-balance
+    (user principal)
+    (circle-id uint)
+  )
+  (map-get? escrow-balances {
+    user: user,
+    circle-id: circle-id,
+  })
+)
+
+(define-read-only (is-member
+    (circle-id uint)
+    (user principal)
+  )
+  (is-circle-member circle-id user)
+)
+
+(define-read-only (get-next-circle-id)
+  (var-get next-circle-id)
+)
+
+(define-read-only (get-next-proposal-id)
+  (var-get next-proposal-id)
+)
