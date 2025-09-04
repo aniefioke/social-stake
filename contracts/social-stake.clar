@@ -100,3 +100,108 @@
   }
   { amount: uint }
 )
+
+;; Governance Proposals
+(define-map governance-proposals
+  { proposal-id: uint }
+  {
+    circle-id: uint,
+    proposer: principal,
+    proposal-type: (string-ascii 32),
+    target: (optional principal),
+    amount: uint,
+    description: (string-ascii 256),
+    votes-for: uint,
+    votes-against: uint,
+    total-votes: uint,
+    created-at: uint,
+    expires-at: uint,
+    executed: bool,
+  }
+)
+
+;; Voting Records
+(define-map member-votes
+  {
+    proposal-id: uint,
+    voter: principal,
+  }
+  {
+    vote: bool,
+    weight: uint,
+    timestamp: uint,
+  }
+)
+
+;; STATE VARIABLES
+
+(define-data-var next-circle-id uint u1)
+(define-data-var next-proposal-id uint u1)
+(define-data-var protocol-fee uint u50) ;; 0.5% protocol fee
+
+;; VALIDATION HELPERS
+
+(define-private (is-circle-member
+    (circle-id uint)
+    (user principal)
+  )
+  (is-some (map-get? circle-members {
+    circle-id: circle-id,
+    member: user,
+  }))
+)
+
+(define-private (get-member-reputation
+    (circle-id uint)
+    (member principal)
+  )
+  (default-to u0
+    (get reputation-score
+      (map-get? circle-members {
+        circle-id: circle-id,
+        member: member,
+      })
+    ))
+)
+
+(define-private (calculate-voting-weight
+    (circle-id uint)
+    (voter principal)
+  )
+  (let ((member-data (map-get? circle-members {
+      circle-id: circle-id,
+      member: voter,
+    })))
+    (match member-data
+      data (+ (get stake-amount data) (get reputation-score data))
+      u0
+    )
+  )
+)
+
+(define-private (update-user-reputation
+    (user principal)
+    (reputation-change int)
+  )
+  (let ((current-rep (default-to {
+      total-reputation: u0,
+      circles-joined: u0,
+      total-staked: u0,
+      last-updated: u0,
+    }
+      (map-get? user-reputation { user: user })
+    )))
+    (map-set user-reputation { user: user }
+      (merge current-rep {
+        total-reputation: (if (>= reputation-change 0)
+          (+ (get total-reputation current-rep) (to-uint reputation-change))
+          (if (> (get total-reputation current-rep) (to-uint (- reputation-change)))
+            (- (get total-reputation current-rep) (to-uint (- reputation-change)))
+            u0
+          )
+        ),
+        last-updated: stacks-block-height,
+      })
+    )
+  )
+)
