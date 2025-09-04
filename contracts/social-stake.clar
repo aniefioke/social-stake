@@ -205,3 +205,105 @@
     )
   )
 )
+
+(define-private (validate-circle-exists (circle-id uint))
+  (is-some (map-get? trust-circles { circle-id: circle-id }))
+)
+
+(define-private (validate-proposal-exists (proposal-id uint))
+  (is-some (map-get? governance-proposals { proposal-id: proposal-id }))
+)
+
+(define-private (validate-proposal-type (proposal-type (string-ascii 32)))
+  (or
+    (is-eq proposal-type "slash")
+    (is-eq proposal-type "reward")
+    (is-eq proposal-type "kick")
+    (is-eq proposal-type "upgrade")
+  )
+)
+
+;; CORE CIRCLE MANAGEMENT
+
+(define-public (create-trust-circle
+    (name (string-ascii 64))
+    (is-public bool)
+    (stake-threshold uint)
+  )
+  (let ((circle-id (var-get next-circle-id)))
+    ;; Input validation
+    (asserts! (>= stake-threshold MIN_CIRCLE_STAKE) ERR_INVALID_PARAMS)
+    (asserts! (and (> (len name) u0) (<= (len name) u64)) ERR_INVALID_PARAMS)
+
+    ;; Create circle record
+    (map-set trust-circles { circle-id: circle-id } {
+      name: name,
+      creator: tx-sender,
+      is-public: is-public,
+      stake-threshold: stake-threshold,
+      total-staked: u0,
+      member-count: u0,
+      created-at: stacks-block-height,
+      reputation-weight: REPUTATION_WEIGHT,
+    })
+
+    ;; Auto-join creator as founding member
+    (try! (join-trust-circle circle-id stake-threshold))
+
+    ;; Increment counter
+    (var-set next-circle-id (+ circle-id u1))
+    (ok circle-id)
+  )
+)
+
+(define-public (join-trust-circle
+    (circle-id uint)
+    (stake-amount uint)
+  )
+  (let ((circle (unwrap! (map-get? trust-circles { circle-id: circle-id })
+      ERR_CIRCLE_NOT_FOUND
+    )))
+    ;; Validation checks
+    (asserts! (not (is-circle-member circle-id tx-sender)) ERR_ALREADY_MEMBER)
+    (asserts! (>= stake-amount (get stake-threshold circle))
+      ERR_INSUFFICIENT_STAKE
+    )
+    (asserts! (>= (stx-get-balance tx-sender) stake-amount)
+      ERR_INSUFFICIENT_BALANCE
+    )
+
+    ;; Transfer stake to escrow
+    (try! (stx-transfer? stake-amount tx-sender (as-contract tx-sender)))
+
+    ;; Record escrowed amount
+    (map-set escrow-balances {
+      user: tx-sender,
+      circle-id: circle-id,
+    } { amount: stake-amount }
+    )
+
+    ;; Add member to circle
+    (map-set circle-members {
+      circle-id: circle-id,
+      member: tx-sender,
+    } {
+      stake-amount: stake-amount,
+      reputation-score: u0,
+      joined-at: stacks-block-height,
+      last-activity: stacks-block-height,
+      is-active: true,
+    })
+
+    ;; Update circle statistics
+    (map-set trust-circles { circle-id: circle-id }
+      (merge circle {
+        total-staked: (+ (get total-staked circle) stake-amount),
+        member-count: (+ (get member-count circle) u1),
+      })
+    )
+
+    ;; Award joining bonus reputation
+    (update-user-reputation tx-sender (to-int REPUTATION_BONUS))
+    (ok true)
+  )
+)
