@@ -307,3 +307,107 @@
     (ok true)
   )
 )
+
+(define-public (leave-trust-circle (circle-id uint))
+  (let (
+      (circle (unwrap! (map-get? trust-circles { circle-id: circle-id })
+        ERR_CIRCLE_NOT_FOUND
+      ))
+      (member-data (unwrap!
+        (map-get? circle-members {
+          circle-id: circle-id,
+          member: tx-sender,
+        })
+        ERR_NOT_MEMBER
+      ))
+      (escrow-data (unwrap!
+        (map-get? escrow-balances {
+          user: tx-sender,
+          circle-id: circle-id,
+        })
+        ERR_NOT_MEMBER
+      ))
+    )
+    ;; Return staked amount from escrow
+    (try! (as-contract (stx-transfer? (get amount escrow-data) tx-sender tx-sender)))
+
+    ;; Clean up records
+    (map-delete circle-members {
+      circle-id: circle-id,
+      member: tx-sender,
+    })
+    (map-delete escrow-balances {
+      user: tx-sender,
+      circle-id: circle-id,
+    })
+
+    ;; Update circle statistics
+    (map-set trust-circles { circle-id: circle-id }
+      (merge circle {
+        total-staked: (- (get total-staked circle) (get stake-amount member-data)),
+        member-count: (- (get member-count circle) u1),
+      })
+    )
+    (ok true)
+  )
+)
+
+;; REPUTATION & SOCIAL CAPITAL SYSTEM
+
+(define-public (endorse-member
+    (circle-id uint)
+    (target principal)
+    (amount uint)
+  )
+  (let (
+      (endorser-data (unwrap!
+        (map-get? circle-members {
+          circle-id: circle-id,
+          member: tx-sender,
+        })
+        ERR_NOT_MEMBER
+      ))
+      (target-data (unwrap!
+        (map-get? circle-members {
+          circle-id: circle-id,
+          member: target,
+        })
+        ERR_NOT_MEMBER
+      ))
+    )
+    ;; Validation
+    (asserts! (validate-circle-exists circle-id) ERR_CIRCLE_NOT_FOUND)
+    (asserts! (and (> amount u0) (<= amount MAX_REPUTATION_TRANSFER))
+      ERR_INVALID_PARAMS
+    )
+    (asserts! (>= (get reputation-score endorser-data) amount)
+      ERR_INSUFFICIENT_BALANCE
+    )
+    (asserts! (not (is-eq tx-sender target)) ERR_INVALID_PARAMS)
+
+    ;; Transfer reputation
+    (map-set circle-members {
+      circle-id: circle-id,
+      member: tx-sender,
+    }
+      (merge endorser-data {
+        reputation-score: (- (get reputation-score endorser-data) amount),
+        last-activity: stacks-block-height,
+      })
+    )
+
+    (map-set circle-members {
+      circle-id: circle-id,
+      member: target,
+    }
+      (merge target-data {
+        reputation-score: (+ (get reputation-score target-data) amount),
+        last-activity: stacks-block-height,
+      })
+    )
+
+    ;; Update global reputation
+    (update-user-reputation target (to-int amount))
+    (ok true)
+  )
+)
