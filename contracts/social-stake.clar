@@ -36,6 +36,8 @@
 (define-constant ERR_VOTING_CLOSED (err u407))
 (define-constant ERR_ALREADY_VOTED (err u408))
 (define-constant ERR_INVALID_VOTE (err u410))
+(define-constant ERR_SLASH_EXCEEDS_STAKE (err u411))
+(define-constant ERR_INVALID_SLASH (err u412))
 
 ;; Economic Parameters
 (define-constant MIN_CIRCLE_STAKE u1000000) ;; 1 STX minimum stake
@@ -48,6 +50,10 @@
 (define-constant VOTING_PERIOD u1440) ;; 24 hours in blocks (~10min blocks)
 (define-constant QUORUM_THRESHOLD u60) ;; 60% participation required
 (define-constant REPUTATION_WEIGHT u100) ;; Base reputation multiplier
+
+;; Slashing Configuration
+(define-data-var slash-cooldown uint u1440) ;; 24 hours cooldown between slashes
+(define-data-var max-slash-percentage uint u50) ;; Max 50% slash per proposal
 
 ;; DATA STRUCTURES
 
@@ -133,11 +139,29 @@
   }
 )
 
+;; Slash History
+(define-map slash-history
+  {
+    circle-id: uint,
+    target: principal,
+    slash-id: uint
+  }
+  {
+    amount: uint,
+    proposer: principal,
+    reason: (string-ascii 256),
+    executed-at: uint,
+    proposal-id: uint
+  }
+)
+
 ;; STATE VARIABLES
 
 (define-data-var next-circle-id uint u1)
 (define-data-var next-proposal-id uint u1)
 (define-data-var protocol-fee uint u50) ;; 0.5% protocol fee
+(define-data-var slash-counter uint u0)
+(define-data-var platform-treasury principal CONTRACT_OWNER)
 
 ;; VALIDATION HELPERS
 
@@ -580,8 +604,105 @@
         )
         ERR_INVALID_PARAMS
       )
-      (ok true)
+      (if (is-eq (get proposal-type proposal) "slash")
+        (match (get target proposal)
+          target-principal (execute-slash 
+            (get circle-id proposal)
+            target-principal
+            (get amount proposal)
+            (get proposer proposal)
+            proposal-id
+          )
+          ERR_INVALID_PARAMS
+        )
+        (ok true)
+      )
     )
+  )
+)
+
+;; New function: Execute Slash
+(define-public (execute-slash
+    (circle-id uint)
+    (target principal)
+    (amount uint)
+    (proposer principal)
+    (proposal-id uint)
+  )
+  (let (
+      (target-member (unwrap! (map-get? circle-members {
+        circle-id: circle-id,
+        member: target,
+      }) ERR_NOT_MEMBER))
+      (target-escrow (unwrap! (map-get? escrow-balances {
+        user: target,
+        circle-id: circle-id,
+      }) ERR_NOT_FOUND))
+      (slash-id (+ (var-get slash-counter) u1))
+      (max-slash (/ (* (get stake-amount target-member) (var-get max-slash-percentage)) u100))
+    )
+    ;; Validate slash amount
+    (asserts! (<= amount max-slash) ERR_SLASH_EXCEEDS_STAKE)
+    (asserts! (> amount u0) ERR_INVALID_SLASH)
+    (asserts! (>= (get stake-amount target-member) amount) ERR_INSUFFICIENT_BALANCE)
+    (asserts! (not (is-eq target proposer)) ERR_UNAUTHORIZED) ;; Can't slash yourself
+
+    ;; Transfer slashed amount to treasury
+    (try! (as-contract (stx-transfer? amount tx-sender (var-get platform-treasury))))
+
+    ;; Update target's stake amount
+    (map-set circle-members {
+      circle-id: circle-id,
+      member: target,
+    }
+      (merge target-member {
+        stake-amount: (- (get stake-amount target-member) amount),
+        reputation-score: (if (> (get reputation-score target-member) amount)
+          (- (get reputation-score target-member) (/ amount u1000))
+          u0
+        )
+      })
+    )
+
+    ;; Update escrow balance
+    (map-set escrow-balances {
+      user: target,
+      circle-id: circle-id,
+    }
+      { amount: (- (get amount target-escrow) amount) }
+    )
+
+    ;; Update circle total staked
+    (let ((circle (unwrap! (map-get? trust-circles { circle-id: circle-id }) ERR_CIRCLE_NOT_FOUND)))
+      (map-set trust-circles { circle-id: circle-id }
+        (merge circle {
+          total-staked: (- (get total-staked circle) amount)
+        })
+      )
+    )
+
+    ;; Record slash history
+    (map-set slash-history {
+      circle-id: circle-id,
+      target: target,
+      slash-id: slash-id
+    } {
+      amount: amount,
+      proposer: proposer,
+      reason: (get description (unwrap! (get-proposal-info proposal-id) ERR_PROPOSAL_NOT_FOUND)),
+      executed-at: stacks-block-height,
+      proposal-id: proposal-id
+    })
+
+    (var-set slash-counter slash-id)
+    (print {
+      event: "member-slashed",
+      circle-id: circle-id,
+      target: target,
+      amount: amount,
+      proposal-id: proposal-id
+    })
+    (ok true)
   )
 )
 
@@ -642,4 +763,40 @@
 
 (define-read-only (get-next-proposal-id)
   (var-get next-proposal-id)
+)
+
+(define-read-only (get-slash-history
+    (circle-id uint)
+    (target principal)
+    (slash-id uint)
+  )
+  (map-get? slash-history {
+    circle-id: circle-id,
+    target: target,
+    slash-id: slash-id
+  })
+)
+
+(define-read-only (get-slash-counter)
+  (var-get slash-counter)
+)
+
+(define-read-only (can-be-slashed
+    (circle-id uint)
+    (target principal)
+  )
+  (let (
+      (last-slash (fold get-last-slash (list circle-id target) none))
+    )
+    (match last-slash
+      slash (>= stacks-block-height (+ (get executed-at slash) (var-get slash-cooldown)))
+      true
+    )
+  )
+)
+
+(define-private (get-last-slash (item {circle-id: uint, target: principal}) (last (optional {executed-at: uint})))
+  ;; Helper to get most recent slash
+  ;; Implementation would need to iterate through slash history
+  (ok none)
 )
